@@ -160,7 +160,17 @@ class PipelineLastLayer(CustomMlxLayer):
             x, *args, **kwargs
         ).arguments.get("cache", None)
 
-        output: mx.array = self.original_layer(x, *args, **kwargs)
+        result = self.original_layer(x, *args, **kwargs)
+
+        # Some layers (e.g. GLM-5.2 DSA) return a (hidden_states, extra) tuple where
+        # `extra` is layer-local bookkeeping (top-k indices). The pipeline transfer
+        # only operates on the hidden states; the extra payload is passed back through.
+        extra: tuple[object, ...] | None = None
+        if isinstance(result, tuple):
+            output: mx.array = result[0]  # pyright: ignore[reportAny]
+            extra = result[1:]
+        else:
+            output = result
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
@@ -191,6 +201,8 @@ class PipelineLastLayer(CustomMlxLayer):
             ]
             mx.eval(output)
 
+        if extra is not None:
+            return (output, *extra)  # pyright: ignore[reportReturnType]
         return output
 
 
