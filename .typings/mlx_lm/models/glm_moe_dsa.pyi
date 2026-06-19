@@ -41,6 +41,12 @@ class ModelArgs(BaseModelArgs):
     attention_bias: bool
     rope_scaling: Dict[str, Any] | None
     rope_theta: float | None
+    def __post_init__(self) -> None: ...
 
 class Model(DSV32Model):
     def __init__(self, config: ModelArgs) -> None: ...
+
+# Cross-layer indexer-schedule classes installed by exo's patch_glm_moe_dsa().
+GlmMoeDsaAttention: type
+GlmMoeDsaDecoderLayer: type
+GlmMoeDsaModel: type

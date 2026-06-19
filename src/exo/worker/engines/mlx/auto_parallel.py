@@ -160,14 +160,18 @@ class PipelineLastLayer(CustomMlxLayer):
             x, *args, **kwargs
         ).arguments.get("cache", None)
 
-        result = self.original_layer(x, *args, **kwargs)
+        # The protocol declares an ``mx.array`` return, but some layers (e.g. GLM-5.2
+        # DSA) return a (hidden_states, extra) tuple where `extra` is layer-local
+        # bookkeeping (top-k indices). The pipeline transfer only operates on the
+        # hidden states; the extra payload is passed back through unchanged.
+        result = cast(
+            "mx.array | tuple[object, ...]",
+            self.original_layer(x, *args, **kwargs),
+        )
 
-        # Some layers (e.g. GLM-5.2 DSA) return a (hidden_states, extra) tuple where
-        # `extra` is layer-local bookkeeping (top-k indices). The pipeline transfer
-        # only operates on the hidden states; the extra payload is passed back through.
         extra: tuple[object, ...] | None = None
         if isinstance(result, tuple):
-            output: mx.array = result[0]  # pyright: ignore[reportAny]
+            output: mx.array = cast(mx.array, result[0])
             extra = result[1:]
         else:
             output = result

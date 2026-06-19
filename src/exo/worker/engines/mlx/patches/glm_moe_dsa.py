@@ -19,7 +19,7 @@ picks it up. Remove this patch once the fork includes #1410.
 """
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import List, Optional, cast
 
 import mlx.core as mx
 from mlx_lm.models import glm_moe_dsa
@@ -39,7 +39,7 @@ class ModelArgs(_BaseModelArgs):
     """GLM-5.2 args extended with the per-layer DSA indexer schedule."""
 
     indexer_types: Optional[List[str]] = None
-    index_topk_pattern: Optional[Any] = None
+    index_topk_pattern: Optional[str | list[str]] = None
     index_topk_freq: int = 1
     index_skip_topk_offset: int = 2
 
@@ -78,10 +78,10 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
         self,
         x: mx.array,
         mask: Optional[mx.array] = None,
-        cache: Optional[Any] = None,
+        cache: Optional[CacheList] = None,
         prev_topk_indices: Optional[mx.array] = None,
     ) -> tuple[mx.array, Optional[mx.array]]:
-        B, L, D = x.shape  # noqa: N806
+        B, L, _ = x.shape  # noqa: N806
 
         qr = self.q_a_layernorm(self.q_a_proj(x))
         q = self.q_b_proj(qr)
@@ -101,11 +101,10 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
 
         if cache is not None:
             kv_latent, k_pe = cache[0].update_and_fetch(kv_latent, k_pe)
-        else:
-            cache = [None] * 2
 
         if self.indexer is not None:
-            topk_indices = self.indexer(x, qr, mask, cache=cache[1])
+            indexer_cache = cache[1] if cache is not None else None
+            topk_indices = self.indexer(x, qr, mask, cache=indexer_cache)
         else:
             topk_indices = prev_topk_indices
 
@@ -137,7 +136,7 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
 
         # Ensure the indexer cache is evaluated even if the topk_indices are unused
         # to keep the graph from getting too large
-        if self.indexer is not None and cache is not None and cache[0] is not None:
+        if self.indexer is not None and cache is not None:
             cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, cache[1].values))
 
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
@@ -174,7 +173,7 @@ class GlmMoeDsaDecoderLayer(DeepseekV32DecoderLayer):
         self,
         x: mx.array,
         mask: Optional[mx.array] = None,
-        cache: Optional[Any] = None,
+        cache: Optional[CacheList] = None,
         prev_topk_indices: Optional[mx.array] = None,
     ) -> tuple[mx.array, Optional[mx.array]]:
         r, topk_indices = self.self_attn(
@@ -196,7 +195,7 @@ class GlmMoeDsaModel(DeepseekV32Model):
     def __call__(
         self,
         x: mx.array,
-        cache: Optional[Any] = None,
+        cache: Optional[list[CacheList | None]] = None,
     ) -> mx.array:
         h = self.embed_tokens(x)
 
@@ -204,7 +203,7 @@ class GlmMoeDsaModel(DeepseekV32Model):
         pipeline_size = self.pipeline_size
 
         if cache is None:
-            cache = [None] * self.num_layers
+            cache = [None for _ in range(self.num_layers)]
         mask = create_attention_mask(
             h, cache[0][0] if cache[0] else None, return_array=True
         )
@@ -241,7 +240,7 @@ class Model(_BaseModel):
         # Shared layers run no indexer, so they get no indexer KVCache.
         caches: list[CacheList] = []
         for layer in self.layers:
-            if getattr(layer.self_attn, "skip_topk", False):
+            if cast(bool, getattr(layer.self_attn, "skip_topk", False)):
                 caches.append(CacheList(KVCache()))
             else:
                 caches.append(CacheList(KVCache(), KVCache()))
