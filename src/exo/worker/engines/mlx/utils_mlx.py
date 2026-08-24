@@ -167,12 +167,17 @@ def load_mlx_items(
     ModelLoadingResponse, None, tuple[Model, TokenizerWrapper, "VisionProcessor | None"]
 ]:
     set_wired_limit_for_model(get_weights_size(bound_instance.bound_shard))
+    strict_weights = (
+        "glm-5.2" in str(bound_instance.bound_shard.model_card.model_id).lower()
+    )
+    if strict_weights:
+        logger.info("Enabling strict checkpoint validation for GLM-5.2")
 
     if group is None:
         logger.info(f"Single device used for {bound_instance.instance}")
         model_path = build_model_path(bound_instance.bound_shard.model_card.model_id)
         start_time = time.perf_counter()
-        model, _ = load_model(model_path, lazy=True, strict=False)
+        model, _ = load_model(model_path, lazy=True, strict=strict_weights)
         # Eval layers one by one for progress reporting
         try:
             inner = get_inner_model(model)
@@ -235,7 +240,10 @@ def shard_and_load(
 ) -> Generator[ModelLoadingResponse, None, tuple[nn.Module, TokenizerWrapper]]:
     model_path = build_model_path(shard_metadata.model_card.model_id)
 
-    model, _ = load_model(model_path, lazy=True, strict=False)
+    strict_weights = "glm-5.2" in str(shard_metadata.model_card.model_id).lower()
+    if strict_weights:
+        logger.info("Enabling strict checkpoint validation for GLM-5.2")
+    model, _ = load_model(model_path, lazy=True, strict=strict_weights)
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass

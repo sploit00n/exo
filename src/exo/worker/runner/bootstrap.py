@@ -15,6 +15,19 @@ from exo.worker.engines.base import Builder
 logger: "loguru.Logger" = loguru.logger
 
 
+def configure_fast_synch_environment() -> str:
+    """Apply exo's explicit override and otherwise preserve MLX's safe default."""
+    override = os.environ.get("EXO_FAST_SYNCH")
+    if override == "true":
+        os.environ["MLX_METAL_FAST_SYNCH"] = "1"
+    elif override == "false":
+        os.environ["MLX_METAL_FAST_SYNCH"] = "0"
+    elif override is not None:
+        raise ValueError("EXO_FAST_SYNCH must be either 'true' or 'false'")
+
+    return os.environ.get("MLX_METAL_FAST_SYNCH", "unset (MLX default)")
+
+
 @dataclass(frozen=True)
 class RunnerTerminationError:
     exception_type: str
@@ -50,13 +63,8 @@ def entrypoint(
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
 
-    fast_synch_override = os.environ.get("EXO_FAST_SYNCH")
-    if fast_synch_override == "false":
-        os.environ["MLX_METAL_FAST_SYNCH"] = "0"
-    else:
-        os.environ["MLX_METAL_FAST_SYNCH"] = "1"
-
-    logger.info(f"Fast synch flag: {os.environ['MLX_METAL_FAST_SYNCH']}")
+    fast_synch_value = configure_fast_synch_environment()
+    logger.info(f"Fast synch flag: {fast_synch_value}")
 
     # Import main after setting global logger - this lets us just import logger from this module
     try:

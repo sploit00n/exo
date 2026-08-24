@@ -239,14 +239,14 @@ The app will ask for permission to modify system settings and install a new Netw
 
 **Custom Namespace for Cluster Isolation:**
 
-The macOS app includes a custom namespace feature that allows you to isolate your exo cluster from others on the same network. This is configured through the `EXO_LIBP2P_NAMESPACE` setting:
+The macOS app includes a custom namespace feature that allows you to isolate your exo cluster from others on the same network:
 
 - **Use cases**:
   - Running multiple separate exo clusters on the same network
   - Isolating development/testing clusters from production clusters
   - Preventing accidental cluster joining
 
-- **Configuration**: Access this setting in the app's Advanced settings (or set the `EXO_LIBP2P_NAMESPACE` environment variable when running from source)
+- **Configuration**: Access this setting in the app's Advanced settings (or pass `--namespace` when running from source)
 
 The namespace is logged on startup for debugging purposes.
 
@@ -312,8 +312,10 @@ exo supports several environment variables for configuration:
 | `EXO_MODELS_READ_ONLY_DIRS` | Colon-separated read-only directories to search for pre-downloaded models (e.g., NFS mounts, shared storage). Models here cannot be deleted. | None |
 | `EXO_OFFLINE` | Run without internet connection (uses only local models) | `false` |
 | `EXO_ENABLE_IMAGE_MODELS` | Enable image model support | `false` |
-| `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `EXO_FAST_SYNCH` | Control MLX_METAL_FAST_SYNCH behavior (for JACCL backend) | Auto |
+| `EXO_MLX_PREFILL_STEP_SIZE` | MLX prompt chunk size. Lower values reduce long-context peak memory. | `4096` |
+| `EXO_GLM_DSA_PRESERVE_SINKS` | Preserve GLM DSA attention sinks and a recent window in sparse top-k. | `true` |
+| `EXO_GLM_DSA_FORCE_DENSE` | Disable GLM sparse DSA selection for short diagnostic runs only. | `false` |
 | `EXO_TRACING_ENABLED` | Enable distributed tracing for performance analysis | `false` |
 
 **Example usage:**
@@ -332,7 +334,7 @@ EXO_OFFLINE=true uv run exo
 EXO_ENABLE_IMAGE_MODELS=true uv run exo
 
 # Use custom namespace for cluster isolation
-EXO_LIBP2P_NAMESPACE=my-dev-cluster uv run exo
+uv run exo --namespace my-dev-cluster
 ```
 
 ---

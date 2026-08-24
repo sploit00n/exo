@@ -1,0 +1,21 @@
+model_id = "kernelpool/GLM-5.2-8bit"
+n_layers = 78
+hidden_size = 6144
+num_key_value_heads = 64
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "glm"
+quantization = "8bit"
+base_model = "GLM-5.2"
+capabilities = ["text", "thinking"]
+reasoning_dialect = "post_last_user"
+context_length = 202752
+backends = ["MlxMetal", "MlxCuda", "MlxCpu"]
+[storage_size]
+in_bytes = 789970472651
+
+# Source: https://huggingface.co/kernelpool/GLM-5.2-8bit
+# Source: https://huggingface.co/zai-org/GLM-5.2
+[sampling_defaults]
+temperature = 1.0
+top_p = 0.95

@@ -9,6 +9,18 @@ from .base import BaseModelArgs
 from .cache import CacheList
 
 class Indexer(nn.Module):
+    dim: int
+    n_heads: int
+    head_dim: int
+    rope_head_dim: int
+    index_topk: int
+    q_lora_rank: int
+    wq_b: nn.Linear
+    wk: nn.Linear
+    k_norm: nn.LayerNorm
+    weights_proj: nn.Linear
+    softmax_scale: float
+    rope: nn.Module
     def __init__(self, args: BaseModelArgs) -> None: ...
     def __call__(
         self,

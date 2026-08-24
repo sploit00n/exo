@@ -1,4 +1,4 @@
-"""Patch mlx_lm's `glm_moe_dsa` model to support GLM-5.2's DSA indexer schedule.
+"""Patch mlx_lm's ``glm_moe_dsa`` implementation for GLM-5.2.
 
 GLM-5.2 (architecture ``GlmMoeDsaForCausalLM``) uses DeepSeek Sparse Attention
 where an *indexer* selects the top-k KV positions each layer attends to. Unlike
@@ -12,26 +12,68 @@ makes every layer run its own indexer. Because exo loads weights with
 uninitialized, producing garbage top-k selections and corrupted output (symbol
 noise during long "thinking" generations).
 
-This patch ports the upstream fix (ml-explore/mlx-lm#1410) — cross-layer indexer
-sharing plus a ``make_cache`` that omits the indexer cache on shared layers — and
-installs it onto the ``mlx_lm.models.glm_moe_dsa`` module so the model loader
-picks it up. Remove this patch once the fork includes #1410.
+In addition to IndexShare, the pinned mlx-lm indexer differs from the GLM
+reference in one important numeric detail: GLM uses LayerNorm epsilon ``1e-6``.
+The sparse selector can also evict the first attention-sink tokens after
+``index_topk``. That has been reproduced as digit/punctuation noise on real
+GLM-5.2 checkpoints. Full layers therefore use a GLM-specific indexer which
+matches the reference epsilon and preserves four sinks plus a small recent
+window before top-k selection. Set ``EXO_GLM_DSA_PRESERVE_SINKS=false`` to
+disable the latter mitigation for reference-parity testing.
+
+The patch installs its classes onto ``mlx_lm.models.glm_moe_dsa`` so the model
+loader picks them up. Remove the corresponding pieces once upstream mlx-lm has
+merged equivalent IndexShare and sparse-selector fixes.
 """
 
+import math
+import os
 from dataclasses import dataclass
-from typing import List, Optional, cast
+from typing import List, Optional, Protocol, cast
 
 import mlx.core as mx
+import mlx.nn as nn
 from mlx_lm.models import glm_moe_dsa
 from mlx_lm.models.base import create_attention_mask, scaled_dot_product_attention
-from mlx_lm.models.cache import CacheList, KVCache
+from mlx_lm.models.cache import BatchKVCache, CacheList, KVCache
 from mlx_lm.models.deepseek_v32 import (
     DeepseekV32Attention,
     DeepseekV32DecoderLayer,
     DeepseekV32Model,
 )
+from mlx_lm.models.deepseek_v32 import (
+    Indexer as DeepseekV32Indexer,
+)
 from mlx_lm.models.glm_moe_dsa import Model as _BaseModel
 from mlx_lm.models.glm_moe_dsa import ModelArgs as _BaseModelArgs
+from mlx_lm.models.rope_utils import initialize_rope
+
+
+class _IndexerCache(Protocol):
+    @property
+    def offset(self) -> int | mx.array: ...
+
+    def update_and_fetch(
+        self, keys: mx.array, values: mx.array
+    ) -> tuple[mx.array, mx.array]: ...
+
+
+type IndexerCache = _IndexerCache | BatchKVCache
+
+
+def _environment_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be one of true/false, 1/0, yes/no, or on/off; got {value!r}"
+    )
 
 
 @dataclass
@@ -42,6 +84,7 @@ class ModelArgs(_BaseModelArgs):
     index_topk_pattern: Optional[str | list[str]] = None
     index_topk_freq: int = 1
     index_skip_topk_offset: int = 2
+    indexer_rope_interleave: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -66,6 +109,111 @@ class ModelArgs(_BaseModelArgs):
             ]
 
 
+class GlmMoeDsaIndexer(DeepseekV32Indexer):
+    """GLM-specific DSA selector with stable sparse top-k behavior."""
+
+    def __init__(self, config: ModelArgs) -> None:
+        super().__init__(config)
+
+        # The GLM/Hugging Face reference uses 1e-6. mlx-lm's inherited
+        # DeepSeek indexer currently relies on LayerNorm's 1e-5 default.
+        self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-6)
+        assert config.rope_theta is not None
+        self.rope = initialize_rope(
+            dims=config.qk_rope_head_dim,
+            base=config.rope_theta,
+            traditional=config.indexer_rope_interleave,
+            max_position_embeddings=config.max_position_embeddings,
+            scaling_config=config.rope_scaling,
+        )
+        self.preserve_attention_sinks = _environment_flag(
+            "EXO_GLM_DSA_PRESERVE_SINKS", default=True
+        )
+        self.force_dense = _environment_flag("EXO_GLM_DSA_FORCE_DENSE", default=False)
+
+    def __call__(
+        self,
+        x: mx.array,
+        qr: mx.array,
+        mask: Optional[mx.array] = None,
+        cache: Optional[IndexerCache] = None,
+    ) -> Optional[mx.array]:
+        """Return sparse key indices, or ``None`` while attention stays dense."""
+        batch_size, sequence_length, _ = x.shape
+        offset = cache.offset if cache is not None else 0
+
+        # Update K even in the dense regime so the indexer cache is complete
+        # when sparse selection engages after index_topk.
+        k = self.k_norm(self.wk(x))
+        k = mx.reshape(k, (batch_size, 1, sequence_length, self.head_dim))
+        k = self.rope(k, offset=offset)
+        if cache is not None:
+            k, _ = cache.update_and_fetch(
+                k, mx.zeros([batch_size, 1, sequence_length, 0])
+            )
+
+        if self.force_dense or k.shape[2] <= self.index_topk:
+            return None
+
+        q = self.wq_b(qr)
+        q = q.reshape(
+            batch_size, sequence_length, self.n_heads, self.head_dim
+        ).swapaxes(1, 2)
+        q = self.rope(q, offset=offset)
+
+        scores = mx.maximum(q @ k.swapaxes(-1, -2), 0)
+        head_scale = 1.0 / math.sqrt(self.n_heads)
+        weights = self.weights_proj(x) * (head_scale * self.softmax_scale)
+        scores = scores * weights.swapaxes(-1, -2)[..., None]
+        scores = scores.sum(axis=1, keepdims=True)
+        if mask is not None:
+            scores = mx.where(mask, scores, -float("inf"))
+
+        if self.preserve_attention_sinks:
+            scores = self._preserve_sinks_and_recent_tokens(scores, cache, offset)
+
+        return mx.argpartition(scores, kth=-self.index_topk, axis=-1)[
+            ..., -self.index_topk :
+        ]
+
+    def _preserve_sinks_and_recent_tokens(
+        self,
+        scores: mx.array,
+        cache: Optional[IndexerCache],
+        offset: int | mx.array,
+    ) -> mx.array:
+        """Reserve part of the top-k budget for sinks and recent tokens."""
+        sink_count = min(4, self.index_topk)
+        recent_window = min(128, max(self.index_topk - sink_count, 0))
+        key_count = scores.shape[-1]
+
+        # BatchKVCache stores offset and left_padding per sequence. A sink is
+        # the first real token, not necessarily column zero in the padded
+        # buffer, so all position math keeps an explicit batch dimension.
+        left_padding = (
+            cache.left_padding if isinstance(cache, BatchKVCache) else mx.array(0)
+        )
+        query_position = mx.arange(scores.shape[2]).reshape(1, -1, 1) + (
+            mx.array(offset) + left_padding
+        ).reshape(-1, 1, 1)
+        key_position = mx.arange(key_count).reshape(1, 1, key_count)
+        sink_start = left_padding.reshape(-1, 1, 1)
+        force_keep = (key_position >= sink_start) & (
+            key_position < sink_start + sink_count
+        )
+        if recent_window > 0:
+            force_keep = force_keep | (
+                (key_position <= query_position)
+                & (key_position > query_position - recent_window)
+            )
+
+        return mx.where(
+            force_keep[:, None],
+            mx.array(float("inf"), scores.dtype),
+            scores,
+        )
+
+
 class GlmMoeDsaAttention(DeepseekV32Attention):
     def __init__(self, config: ModelArgs, layer_idx: int) -> None:
         super().__init__(config)
@@ -73,6 +221,8 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
         self.skip_topk = config.indexer_types[layer_idx] == "shared"
         if self.skip_topk:
             self.indexer = None
+        else:
+            self.indexer = GlmMoeDsaIndexer(config)
 
     def __call__(
         self,
@@ -256,6 +406,7 @@ def patch_glm_moe_dsa() -> None:
     """
     glm_moe_dsa.ModelArgs = ModelArgs
     glm_moe_dsa.Model = Model
+    glm_moe_dsa.GlmMoeDsaIndexer = GlmMoeDsaIndexer
     glm_moe_dsa.GlmMoeDsaAttention = GlmMoeDsaAttention
     glm_moe_dsa.GlmMoeDsaDecoderLayer = GlmMoeDsaDecoderLayer
     glm_moe_dsa.GlmMoeDsaModel = GlmMoeDsaModel

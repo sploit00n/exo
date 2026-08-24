@@ -47,6 +47,7 @@ class Model(DSV32Model):
     def __init__(self, config: ModelArgs) -> None: ...
 
 # Cross-layer indexer-schedule classes installed by exo's patch_glm_moe_dsa().
+GlmMoeDsaIndexer: type
 GlmMoeDsaAttention: type
 GlmMoeDsaDecoderLayer: type
 GlmMoeDsaModel: type

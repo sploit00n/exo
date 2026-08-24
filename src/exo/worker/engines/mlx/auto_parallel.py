@@ -302,6 +302,13 @@ def pipeline_auto_parallel(
     Returns:
     The parallelized model
     """
+    if isinstance(model, DeepseekV32Model) and model.model_type == "glm_moe_dsa":
+        raise ValueError(
+            "GLM DSA IndexShare is not safe with pipeline sharding because a "
+            "shared layer can start a shard without the previous full layer's "
+            "top-k indices. Use Tensor sharding instead."
+        )
+
     inner_model_instance: nn.Module = get_inner_model(model)
 
     layers = get_layers(inner_model_instance)
